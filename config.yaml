@@ -3,9 +3,9 @@
 
 spotify:
   # Create an app at https://developer.spotify.com/dashboard
-  client_id:     "4c04460c534642b2877806b661caf56e"
-  client_secret: "e76afe7606434fd6b3bd757e7c6581e7"
-  redirect_uri:  "http://localhost:8888/callback"
+  client_id:     "cb31b1954a20432384b9b16896915fde"
+  client_secret: "909402d5a90943dba5a8ed35bdfae146"
+  redirect_uri:  "http://127.0.0.1:8888/callback"
   # spotipy caches the OAuth token here so you only log in once.
   cache_path:    ".spotify_cache"
 
@@ -22,7 +22,7 @@ slskd:
   api_key: "YOUR_SLSKD_API_KEY"
   # Host path where slskd saves completed downloads.
   # Must be the path as seen by THIS script, not inside the Docker container.
-  download_dir: "E:\The Keep\Music"
+  download_dir: 'E:\The Keep\Music'
   # Seconds to wait for Soulseek search results before giving up.
   search_timeout: 30
   # Maximum number of result files to evaluate per search.
