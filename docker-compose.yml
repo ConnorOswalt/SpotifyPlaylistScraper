@@ -1,0 +1,20 @@
+services:
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    ports:
+      - "5030:5030"    # Web UI / REST API
+      - "50300:50300"  # Soulseek peer port (open this on your router/firewall)
+    volumes:
+      # slskd writes its config and state into this folder.
+      - ./slskd-config:/app
+      # Downloads land here.  Set slskd.download_dir in config.yaml to match
+      # the HOST-side path (./downloads).
+      - ./downloads:/downloads
+      # Optional: give slskd a read-only view of your library so it can skip
+      # tracks you already own.  Remove if not needed.
+      - ./music:/music:ro
+    environment:
+      # Allows changing settings via the web UI without editing the YAML file.
+      - SLSKD_REMOTE_CONFIGURATION=true
