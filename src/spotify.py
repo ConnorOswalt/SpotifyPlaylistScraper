@@ -57,27 +57,28 @@ class SpotifyFetcher:
 
         results = self._sp.playlist_items(
             playlist_id,
-            fields=(
-                "next,"
-                "items(track(id,name,artists(name),album(name),"
-                "external_ids(isrc),duration_ms))"
-            ),
             additional_types=["track"],
         )
 
         while results:
             for item in results.get("items", []):
-                raw = item.get("track")
+                # Spotify has returned both `track` (legacy) and `item` (newer)
+                # playlist entry shapes over time; support both.
+                raw = item.get("track") or item.get("item")
                 if not raw or not raw.get("id"):
                     # Local tracks or null entries have no Spotify ID — skip them.
                     continue
+                if raw.get("type") and raw.get("type") != "track":
+                    # Ignore podcast episodes and any non-track item types.
+                    continue
 
                 artists = ", ".join(a["name"] for a in raw.get("artists", []))
+                album = (raw.get("album") or {}).get("name", "Unknown Album")
                 tracks.append(
                     SpotifyTrack(
                         title=raw["name"],
                         artist=artists,
-                        album=raw["album"]["name"],
+                        album=album,
                         isrc=raw.get("external_ids", {}).get("isrc"),
                         duration_ms=raw.get("duration_ms", 0),
                         spotify_id=raw["id"],
