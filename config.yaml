@@ -3,8 +3,8 @@
 
 spotify:
   # Create an app at https://developer.spotify.com/dashboard
-  client_id:     "cb31b1954a20432384b9b16896915fde"
-  client_secret: "909402d5a90943dba5a8ed35bdfae146"
+  client_id:     "#yourIDhere#"
+  client_secret: "#yourIDhere#"
   redirect_uri:  "http://127.0.0.1:8888/callback"
   # spotipy caches the OAuth token here so you only log in once.
   cache_path:    ".spotify_cache"
