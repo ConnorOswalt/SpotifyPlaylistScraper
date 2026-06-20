@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import requests
@@ -10,6 +11,10 @@ import requests
 from .spotify import SpotifyTrack
 
 logger = logging.getLogger(__name__)
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
 class JellyfinClient:
@@ -48,11 +53,23 @@ class JellyfinClient:
             logger.warning("Jellyfin search failed for '%s': %s", track.title, exc)
             return None
 
-        # Match when any Spotify artist intersects the Jellyfin item's artist list.
+        sp_title = _norm(track.title)
+        sp_album = _norm(track.album)
         sp_artists = {a.strip().lower() for a in track.artist.split(",")}
+
+        # First pass: strongest match with title + artist + album.
         for item in resp.json().get("Items", []):
+            item_name = _norm(item.get("Name", ""))
             item_artists = {a.lower() for a in item.get("Artists", [])}
-            if sp_artists & item_artists:
+            item_album = _norm(item.get("Album", ""))
+            if item_name == sp_title and (sp_artists & item_artists) and item_album == sp_album:
+                return item["Id"]
+
+        # Second pass: title + artist when album metadata differs.
+        for item in resp.json().get("Items", []):
+            item_name = _norm(item.get("Name", ""))
+            item_artists = {a.lower() for a in item.get("Artists", [])}
+            if item_name == sp_title and (sp_artists & item_artists):
                 return item["Id"]
 
         return None

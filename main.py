@@ -13,6 +13,7 @@ import yaml
 
 from src.jellyfin import JellyfinClient
 from src.library import LibraryManager
+from src.postprocess import PicardPostProcessor
 from src.slskd import SlskdClient
 from src.spotify import SpotifyFetcher, SpotifyTrack
 
@@ -48,6 +49,7 @@ def process_tracks_for_playlist(
     jellyfin: JellyfinClient,
     slskd: SlskdClient,
     lib_mgr: LibraryManager,
+    postprocessor: PicardPostProcessor,
     lib_cfg: dict,
     tracks: list[SpotifyTrack],
     jellyfin_playlist_id: str,
@@ -119,6 +121,12 @@ def process_tracks_for_playlist(
             failed += 1
             continue
 
+        post_ok = postprocessor.process(dest, track)
+        if not post_ok:
+            logger.error("[VERIFY FAIL] %s - metadata verification/standardization failed", label)
+            failed += 1
+            continue
+
         jellyfin.refresh_library()
         scan_wait: int = lib_cfg.get("scan_wait", 15)
         logger.info("[SCANNING  ] Waiting %ds for Jellyfin to index new file...", scan_wait)
@@ -161,6 +169,14 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
     )
     lib_mgr = LibraryManager(music_dir=cfg["library"]["music_dir"])
     lib_cfg: dict = cfg["library"]
+    picard_cfg: dict = cfg.get("picard", {})
+    postprocessor = PicardPostProcessor(
+        enabled=picard_cfg.get("enabled", False),
+        command_template=picard_cfg.get("command_template", ""),
+        timeout=picard_cfg.get("timeout", 180),
+        verify_artist_title=picard_cfg.get("verify_artist_title", True),
+        require_success=picard_cfg.get("require_success", False),
+    )
 
     if args.sync_all_playlists:
         source_playlists = spotify.get_current_user_playlists()
@@ -189,6 +205,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
                 jellyfin=jellyfin,
                 slskd=slskd,
                 lib_mgr=lib_mgr,
+                postprocessor=postprocessor,
                 lib_cfg=lib_cfg,
                 tracks=tracks,
                 jellyfin_playlist_id=playlist_id,
@@ -231,6 +248,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
         jellyfin=jellyfin,
         slskd=slskd,
         lib_mgr=lib_mgr,
+        postprocessor=postprocessor,
         lib_cfg=lib_cfg,
         tracks=tracks,
         jellyfin_playlist_id=playlist_id,

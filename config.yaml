@@ -46,3 +46,19 @@ library:
   download_poll_interval: 5
   # Maximum seconds to wait for a single file to finish downloading.
   download_timeout: 600
+
+picard:
+  # Enable to run a post-download metadata standardization pass.
+  enabled: false
+  # Command template executed after a file is moved into your music library.
+  # Available placeholders:
+  #   {file} {artist} {title} {album} {isrc}
+  # Example (replace with your actual Picard CLI command/script):
+  # command_template: "picard.exe --your-automation-flag \"{file}\""
+  command_template: ""
+  # Seconds to wait before killing the external command.
+  timeout: 180
+  # Verify resulting file tags roughly match Spotify artist/title.
+  verify_artist_title: true
+  # If true, fail the track when Picard processing or verification fails.
+  require_success: false
