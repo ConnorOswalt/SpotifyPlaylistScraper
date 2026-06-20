@@ -14,7 +14,7 @@ import yaml
 from src.jellyfin import JellyfinClient
 from src.library import LibraryManager
 from src.slskd import SlskdClient
-from src.spotify import SpotifyFetcher
+from src.spotify import SpotifyFetcher, SpotifyTrack
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,98 @@ def resolve_playlist_id(jellyfin: JellyfinClient, name_or_id: str) -> str:
     return jellyfin.get_or_create_playlist(name_or_id)
 
 
+def process_tracks_for_playlist(
+    jellyfin: JellyfinClient,
+    slskd: SlskdClient,
+    lib_mgr: LibraryManager,
+    lib_cfg: dict,
+    tracks: list[SpotifyTrack],
+    jellyfin_playlist_id: str,
+    no_download: bool,
+) -> tuple[int, int, int, int]:
+    matched = downloaded = failed = skipped = 0
+
+    for track in tracks:
+        label = f"{track.artist} - {track.title}"
+
+        jf_id = jellyfin.search_track(track)
+        if jf_id:
+            logger.info("[LIBRARY   ] %s", label)
+            jellyfin.add_to_playlist(jellyfin_playlist_id, [jf_id])
+            matched += 1
+            continue
+
+        if no_download:
+            logger.info("[SKIP      ] %s", label)
+            skipped += 1
+            continue
+
+        query = f"{track.artist} - {track.title}"
+        logger.info("[SEARCH    ] %s", label)
+
+        raw_results = slskd.search(query)
+        candidates = slskd.filter_candidates(
+            raw_results,
+            accepted_formats=lib_cfg.get("accepted_formats", ["flac", "mp3"]),
+            min_mp3_bitrate=lib_cfg.get("min_mp3_bitrate", 320),
+            prefer_flac=lib_cfg.get("prefer_flac", True),
+            album_hint=track.album,
+        )
+
+        if not candidates:
+            logger.warning("[MISSING   ] %s - no suitable results on Soulseek", label)
+            failed += 1
+            continue
+
+        best = candidates[0]
+        fmt_str = best.extension.upper()
+        if best.bitrate:
+            fmt_str += f" {best.bitrate} kbps"
+        logger.info(
+            "[DOWNLOAD  ] %s  <-  %s  (%s)",
+            best.filename.rsplit("\\", 1)[-1].rsplit("/", 1)[-1],
+            best.username,
+            fmt_str,
+        )
+
+        slskd.queue_download(best)
+        local_path = slskd.wait_for_download(
+            username=best.username,
+            filename=best.filename,
+            poll_interval=lib_cfg.get("download_poll_interval", 5),
+            timeout=lib_cfg.get("download_timeout", 600),
+        )
+
+        if local_path is None or not local_path.exists():
+            logger.error("[DL FAIL   ] %s", label)
+            failed += 1
+            continue
+
+        try:
+            dest = lib_mgr.move_to_library(local_path, track.artist, track.album)
+            logger.info("[MOVED     ] %s", dest)
+        except OSError as exc:
+            logger.error("[MOVE FAIL ] %s - %s", label, exc)
+            failed += 1
+            continue
+
+        jellyfin.refresh_library()
+        scan_wait: int = lib_cfg.get("scan_wait", 15)
+        logger.info("[SCANNING  ] Waiting %ds for Jellyfin to index new file...", scan_wait)
+        time.sleep(scan_wait)
+
+        jf_id = jellyfin.find_track_by_name_artist(track.title, track.artist)
+        if jf_id:
+            jellyfin.add_to_playlist(jellyfin_playlist_id, [jf_id])
+            logger.info("[ADDED     ] %s", label)
+            downloaded += 1
+        else:
+            logger.warning("[NO INDEX  ] %s - downloaded but not visible in Jellyfin yet", label)
+            failed += 1
+
+    return matched, downloaded, failed, skipped
+
+
 # ---------------------------------------------------------------------------
 # Core pipeline
 # ---------------------------------------------------------------------------
@@ -70,118 +162,80 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
     lib_mgr = LibraryManager(music_dir=cfg["library"]["music_dir"])
     lib_cfg: dict = cfg["library"]
 
-    # ------------------------------------------------------------------
-    # Stage 1 — Fetch playlist from Spotify
-    # ------------------------------------------------------------------
+    if args.sync_all_playlists:
+        source_playlists = spotify.get_current_user_playlists()
+        if args.playlist_name_contains:
+            needle = args.playlist_name_contains.lower()
+            source_playlists = [
+                p for p in source_playlists if needle in p.name.lower()
+            ]
+
+        logger.info("Discovered %d Spotify playlists for sync", len(source_playlists))
+
+        grand_matched = grand_downloaded = grand_failed = grand_skipped = 0
+        for source in source_playlists:
+            logger.info("Syncing playlist: %s", source.name)
+            tracks = spotify.get_playlist_tracks(source.spotify_id)
+
+            if args.dry_run:
+                print(f"\nPlaylist: {source.name} ({len(tracks)} tracks)")
+                for t in tracks:
+                    isrc = t.isrc or "no ISRC"
+                    print(f"  {t.artist} - {t.title}  |  {t.album}  |  {isrc}")
+                continue
+
+            playlist_id = resolve_playlist_id(jellyfin, source.name)
+            matched, downloaded, failed, skipped = process_tracks_for_playlist(
+                jellyfin=jellyfin,
+                slskd=slskd,
+                lib_mgr=lib_mgr,
+                lib_cfg=lib_cfg,
+                tracks=tracks,
+                jellyfin_playlist_id=playlist_id,
+                no_download=args.no_download,
+            )
+            grand_matched += matched
+            grand_downloaded += downloaded
+            grand_failed += failed
+            grand_skipped += skipped
+
+        if args.dry_run:
+            return
+
+        total = grand_matched + grand_downloaded + grand_failed + grand_skipped
+        print(f"\n{'=' * 52}")
+        print(f"  Processed              : {total}")
+        print(f"  Matched in library     : {grand_matched}")
+        print(f"  Downloaded & added     : {grand_downloaded}")
+        print(f"  Failed / not found     : {grand_failed}")
+        print(f"  Skipped (--no-download): {grand_skipped}")
+        print(f"{'=' * 52}")
+        return
+
     logger.info("Fetching Spotify playlist: %s", args.spotify_playlist)
     tracks = spotify.get_playlist_tracks(args.spotify_playlist)
     logger.info("Total tracks: %d", len(tracks))
 
     if args.dry_run:
-        for t in tracks:
+        preview_tracks = tracks[:10]
+        print(f"Showing first {len(preview_tracks)} of {len(tracks)} tracks:")
+        for t in preview_tracks:
             isrc = t.isrc or "no ISRC"
-            print(f"  {t.artist} – {t.title}  |  {t.album}  |  {isrc}")
+            print(f"  {t.artist} - {t.title}  |  {t.album}  |  {isrc}")
         return
 
     playlist_id = resolve_playlist_id(jellyfin, args.jellyfin_playlist)
     logger.info("Target Jellyfin playlist: %s", playlist_id)
 
-    matched = downloaded = failed = skipped = 0
-
-    for track in tracks:
-        label = f"{track.artist} – {track.title}"
-
-        # ------------------------------------------------------------------
-        # Stage 2 — Check Jellyfin local library
-        # ------------------------------------------------------------------
-        jf_id = jellyfin.search_track(track)
-        if jf_id:
-            logger.info("[✓ LIBRARY  ] %s", label)
-            jellyfin.add_to_playlist(playlist_id, [jf_id])
-            matched += 1
-            continue
-
-        if args.no_download:
-            logger.info("[– SKIP     ] %s", label)
-            skipped += 1
-            continue
-
-        # ------------------------------------------------------------------
-        # Stage 3 — Search Soulseek via slskd
-        # ------------------------------------------------------------------
-        query = f"{track.artist} - {track.title}"
-        logger.info("[? SEARCH   ] %s", label)
-
-        raw_results = slskd.search(query)
-        candidates = slskd.filter_candidates(
-            raw_results,
-            accepted_formats=lib_cfg.get("accepted_formats", ["flac", "mp3"]),
-            min_mp3_bitrate=lib_cfg.get("min_mp3_bitrate", 320),
-            prefer_flac=lib_cfg.get("prefer_flac", True),
-            album_hint=track.album,
-        )
-
-        if not candidates:
-            logger.warning("[✗ MISSING  ] %s — no suitable results on Soulseek", label)
-            failed += 1
-            continue
-
-        best = candidates[0]
-        fmt_str = best.extension.upper()
-        if best.bitrate:
-            fmt_str += f" {best.bitrate} kbps"
-        logger.info(
-            "[↓ DOWNLOAD ] %s  ←  %s  (%s)",
-            best.filename.rsplit("\\", 1)[-1].rsplit("/", 1)[-1],
-            best.username,
-            fmt_str,
-        )
-
-        # ------------------------------------------------------------------
-        # Stage 4 — Queue and await the download
-        # ------------------------------------------------------------------
-        slskd.queue_download(best)
-        local_path = slskd.wait_for_download(
-            username=best.username,
-            filename=best.filename,
-            poll_interval=lib_cfg.get("download_poll_interval", 5),
-            timeout=lib_cfg.get("download_timeout", 600),
-        )
-
-        if local_path is None or not local_path.exists():
-            logger.error("[✗ DL FAIL  ] %s", label)
-            failed += 1
-            continue
-
-        # ------------------------------------------------------------------
-        # Stage 5 — Move file into Jellyfin library structure
-        # ------------------------------------------------------------------
-        try:
-            dest = lib_mgr.move_to_library(local_path, track.artist, track.album)
-            logger.info("[→ MOVED    ] %s", dest)
-        except OSError as exc:
-            logger.error("[✗ MOVE FAIL] %s — %s", label, exc)
-            failed += 1
-            continue
-
-        # ------------------------------------------------------------------
-        # Stage 6 — Refresh Jellyfin, wait for scan, add to playlist
-        # ------------------------------------------------------------------
-        jellyfin.refresh_library()
-        scan_wait: int = lib_cfg.get("scan_wait", 15)
-        logger.info("[⟳ SCANNING ] Waiting %ds for Jellyfin to index new file...", scan_wait)
-        time.sleep(scan_wait)
-
-        jf_id = jellyfin.find_track_by_name_artist(track.title, track.artist)
-        if jf_id:
-            jellyfin.add_to_playlist(playlist_id, [jf_id])
-            logger.info("[✓ ADDED    ] %s", label)
-            downloaded += 1
-        else:
-            logger.warning(
-                "[⚠ NO INDEX ] %s — file downloaded but not yet visible in Jellyfin", label
-            )
-            failed += 1
+    matched, downloaded, failed, skipped = process_tracks_for_playlist(
+        jellyfin=jellyfin,
+        slskd=slskd,
+        lib_mgr=lib_mgr,
+        lib_cfg=lib_cfg,
+        tracks=tracks,
+        jellyfin_playlist_id=playlist_id,
+        no_download=args.no_download,
+    )
 
     # ------------------------------------------------------------------
     # Summary
@@ -209,8 +263,9 @@ def main() -> None:
             "  python main.py \\\n"
             "      --spotify-playlist 'https://open.spotify.com/playlist/37i9dQZF1DX...' \\\n"
             "      --jellyfin-playlist 'My Mix'\n\n"
-            "  python main.py --spotify-playlist <id> --jellyfin-playlist <name> --dry-run\n"
+            "  python main.py --spotify-playlist <id> --dry-run\n"
             "  python main.py --spotify-playlist <id> --jellyfin-playlist <name> --no-download\n"
+            "  python main.py --sync-all-playlists\n"
         ),
     )
     parser.add_argument(
@@ -220,18 +275,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--spotify-playlist",
-        required=True,
         help="Spotify playlist URL, URI, or ID",
     )
     parser.add_argument(
         "--jellyfin-playlist",
-        required=True,
         help="Target Jellyfin playlist name (created if absent) or UUID",
+    )
+    parser.add_argument(
+        "--sync-all-playlists",
+        action="store_true",
+        help="Read all playlists from the authenticated Spotify account and mirror each by name to Jellyfin",
+    )
+    parser.add_argument(
+        "--playlist-name-contains",
+        help="Optional substring filter when using --sync-all-playlists",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print track list only; make no changes to Jellyfin or slskd",
+        help="For a single Spotify playlist, print only the first 10 tracks and make no changes",
     )
     parser.add_argument(
         "--no-download",
@@ -245,6 +307,16 @@ def main() -> None:
         help="Logging verbosity (default: INFO)",
     )
     args = parser.parse_args()
+
+    if not args.sync_all_playlists:
+        if not args.spotify_playlist:
+            parser.error(
+                "Pass --spotify-playlist for single-playlist mode, or use --sync-all-playlists."
+            )
+        if not args.dry_run and not args.jellyfin_playlist:
+            parser.error(
+                "--jellyfin-playlist is required unless using --dry-run."
+            )
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
