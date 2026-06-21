@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import spotipy
+from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,18 @@ class SpotifyFetcher:
         """Fetch all tracks from a playlist, including ISRC and album metadata."""
         tracks: list[SpotifyTrack] = []
 
-        results = self._sp.playlist_items(
-            playlist_id,
-            additional_types=["track"],
-        )
+        try:
+            results = self._sp.playlist_items(
+                playlist_id,
+                additional_types=["track"],
+            )
+        except SpotifyException as exc:
+            if exc.http_status == 404:
+                raise RuntimeError(
+                    f"Spotify playlist not found or inaccessible: {playlist_id}. "
+                    "Verify the playlist URL/ID and ensure it is visible to the authenticated account."
+                ) from exc
+            raise
 
         while results:
             for item in results.get("items", []):

@@ -1,28 +1,28 @@
-# Spotify Playlist Scraper — Configuration
+# Spotify Playlist Scraper - Configuration
 # Copy to config.yaml and fill in your credentials before running.
 
 spotify:
   # Create an app at https://developer.spotify.com/dashboard
-  client_id:     "#yourIDhere#"
-  client_secret: "#yourIDhere#"
+  client_id:     "cb31b1954a20432384b9b16896915fde"
+  client_secret: "909402d5a90943dba5a8ed35bdfae146"
   redirect_uri:  "http://127.0.0.1:8888/callback"
   # spotipy caches the OAuth token here so you only log in once.
   cache_path:    ".spotify_cache"
 
 jellyfin:
   url: "http://localhost:8096"
-  # Dashboard → Advanced → API Keys → [+]
+  # Dashboard -> Advanced -> API Keys -> [+]
   api_key: "ffeb6e7bac8e473b9c55d8340aec4e29"
-  # Dashboard → Users → click your user → copy the UUID from the URL bar
+  # Dashboard -> Users -> click your user -> copy the UUID from the URL bar
   user_id: "connor"
 
 slskd:
   url: "http://localhost:5030"
-  # Set in slskd's appsettings.yml under  security > apiKeys
-  api_key: "YOUR_SLSKD_API_KEY"
+  # Set in slskd's appsettings.yml under security > apiKeys
+  api_key: "spotifysoulkey01"
   # Host path where slskd saves completed downloads.
   # Must be the path as seen by THIS script, not inside the Docker container.
-  download_dir: 'E:\The Keep\Music'
+  download_dir: './downloads'
   # Seconds to wait for Soulseek search results before giving up.
   search_timeout: 30
   # Maximum number of result files to evaluate per search.
@@ -30,13 +30,15 @@ slskd:
 
 library:
   # Root directory of your Jellyfin music library (as seen by THIS script).
-  music_dir: "./music"
+  music_dir: 'E:\The Keep\Music'
   # Accepted audio formats, checked in order.
   accepted_formats:
     - flac
     - mp3
   # Reject MP3 files below this bitrate (kbps).
   min_mp3_bitrate: 320
+  # If strict filtering finds nothing, retry with this lower MP3 floor.
+  fallback_min_mp3_bitrate: 192
   # When both FLAC and MP3 exist, prefer FLAC.
   prefer_flac: true
   # Seconds to wait after triggering a Jellyfin library refresh before

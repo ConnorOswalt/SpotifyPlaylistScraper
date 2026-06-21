@@ -90,6 +90,14 @@ class SlskdClient:
         }
 
         resp = self._session.post(f"{self.url}/api/v0/searches", json=payload)
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "slskd rejected the API key. Update slskd.api_key in config.yaml to match slskd-config/slskd.yml."
+            )
+        if resp.status_code == 409:
+            raise RuntimeError(
+                "slskd is not connected to Soulseek yet. Open http://localhost:5030, sign in with your Soulseek username/password, and connect the server before running imports."
+            )
         resp.raise_for_status()
 
         # Poll until the search reaches a terminal state.
@@ -104,34 +112,73 @@ class SlskdClient:
             if any(s in state for s in _TERMINAL_SEARCH_STATES):
                 break
 
-        # Remove the search from slskd to keep it tidy.
-        try:
-            self._session.delete(f"{self.url}/api/v0/searches/{search_id}")
-        except requests.RequestException:
-            pass
+        response_rows = data.get("responses") or []
+        # Some slskd builds may omit embedded response rows from /searches/{id}
+        # while exposing responseCount/fileCount. Try optional response endpoints.
+        response_count = int(data.get("responseCount") or 0)
+        if (not response_rows) and response_count > 0:
+            candidate_paths = [
+                f"{self.url}/api/v0/searches/{search_id}/responses",
+            ]
+            token = data.get("token")
+            if token is not None:
+                candidate_paths.append(f"{self.url}/api/v0/searches/{token}/responses")
+
+            # slskd can report responseCount > 0 while /responses materializes shortly later.
+            fetch_deadline = time.monotonic() + 20
+            while time.monotonic() < fetch_deadline and not response_rows:
+                for endpoint in candidate_paths:
+                    try:
+                        rr = self._session.get(endpoint)
+                        if rr.status_code == 404:
+                            continue
+                        rr.raise_for_status()
+                        response_rows = rr.json() or []
+                        if response_rows:
+                            break
+                    except requests.RequestException:
+                        continue
+                if not response_rows:
+                    time.sleep(2)
+
+            if not response_rows:
+                logger.warning(
+                    "slskd search reported %s responses for '%s' but no rows were retrievable",
+                    response_count,
+                    query,
+                )
 
         results: list[SlskdFile] = []
-        for response in data.get("responses") or []:
-            username: str = response["username"]
-            free_slots: int = response.get("freeUploadSlots", 0)
-            for f in response.get("files", []):
-                raw_name: str = f.get("filename", "")
-                # Normalise Windows-style backslash separators for Path parsing.
-                ext = Path(raw_name.replace("\\", "/")).suffix.lstrip(".").lower()
-                results.append(
-                    SlskdFile(
-                        username=username,
-                        filename=raw_name,
-                        size=f.get("size", 0),
-                        bitrate=f.get("bitRate"),
-                        extension=ext,
-                        free_slots=free_slots,
+        try:
+            for response in response_rows:
+                username: str = response.get("username", "")
+                has_free_slot = bool(response.get("hasFreeUploadSlot", False))
+                free_slots: int = response.get("freeUploadSlots", 1 if has_free_slot else 0)
+                for f in response.get("files", []):
+                    raw_name: str = f.get("filename", "")
+                    # Normalise Windows-style backslash separators for Path parsing.
+                    ext = Path(raw_name.replace("\\", "/")).suffix.lstrip(".").lower()
+                    results.append(
+                        SlskdFile(
+                            username=username,
+                            filename=raw_name,
+                            size=f.get("size", 0),
+                            bitrate=f.get("bitRate"),
+                            extension=ext,
+                            free_slots=free_slots,
+                        )
                     )
-                )
+                    if len(results) >= self.result_limit:
+                        break
                 if len(results) >= self.result_limit:
-                    return results
-
-        return results
+                    break
+            return results
+        finally:
+            # Remove the search from slskd to keep it tidy.
+            try:
+                self._session.delete(f"{self.url}/api/v0/searches/{search_id}")
+            except requests.RequestException:
+                pass
 
     # ------------------------------------------------------------------
     # Filtering & ranking
@@ -206,6 +253,22 @@ class SlskdClient:
         """
         deadline = time.monotonic() + timeout
 
+        def _iter_transfers(payload: object) -> list[dict]:
+            # slskd may return either a flat transfer list or a grouped object
+            # with directories[].files[] depending on version/endpoint behavior.
+            if isinstance(payload, list):
+                return [x for x in payload if isinstance(x, dict)]
+            if isinstance(payload, dict):
+                out: list[dict] = []
+                for d in payload.get("directories", []) or []:
+                    if not isinstance(d, dict):
+                        continue
+                    for f in d.get("files", []) or []:
+                        if isinstance(f, dict):
+                            out.append(f)
+                return out
+            return []
+
         while time.monotonic() < deadline:
             time.sleep(poll_interval)
 
@@ -218,7 +281,7 @@ class SlskdClient:
                 logger.warning("Transfer status check failed: %s", exc)
                 continue
 
-            for xfer in resp.json():
+            for xfer in _iter_transfers(resp.json()):
                 if xfer.get("filename") != filename:
                     continue
                 state: str = xfer.get("state", "")

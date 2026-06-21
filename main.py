@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 import re
 import sys
 import time
@@ -32,6 +33,57 @@ _UUID_RE = re.compile(
 def load_config(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    return (
+        lowered.startswith("your_")
+        or "youridhere" in lowered
+        or text.startswith("#")
+        or text.endswith("#")
+    )
+
+
+def validate_config(cfg: dict) -> None:
+    spotify_cfg = cfg.get("spotify", {})
+    if _looks_like_placeholder(spotify_cfg.get("client_id")):
+        raise ValueError("spotify.client_id is not set to a real Spotify app client ID.")
+    if _looks_like_placeholder(spotify_cfg.get("client_secret")):
+        raise ValueError("spotify.client_secret is not set to a real Spotify app client secret.")
+
+
+def resolve_slskd_api_key(cfg: dict) -> str:
+    """Use config.yaml by default, but fall back to local slskd.yml for placeholder values."""
+    configured = str(cfg["slskd"].get("api_key", "")).strip()
+    if configured and not configured.startswith("YOUR_"):
+        return configured
+
+    slskd_config_path = Path("slskd-config") / "slskd.yml"
+    if not slskd_config_path.exists():
+        return configured
+
+    try:
+        with open(slskd_config_path, encoding="utf-8") as fh:
+            slskd_cfg = yaml.safe_load(fh) or {}
+    except OSError:
+        return configured
+
+    api_keys = (
+        slskd_cfg.get("web", {})
+        .get("authentication", {})
+        .get("api_keys", {})
+    )
+    for entry in api_keys.values():
+        key = str((entry or {}).get("key", "")).strip()
+        if key:
+            logger.info("Using API key from local slskd-config/slskd.yml")
+            return key
+
+    return configured
 
 
 def resolve_playlist_id(jellyfin: JellyfinClient, name_or_id: str) -> str:
@@ -75,7 +127,13 @@ def process_tracks_for_playlist(
         query = f"{track.artist} - {track.title}"
         logger.info("[SEARCH    ] %s", label)
 
-        raw_results = slskd.search(query)
+        try:
+            raw_results = slskd.search(query)
+        except RuntimeError as exc:
+            logger.error("[SEARCH FAIL] %s - %s", label, exc)
+            failed += 1
+            continue
+
         candidates = slskd.filter_candidates(
             raw_results,
             accepted_formats=lib_cfg.get("accepted_formats", ["flac", "mp3"]),
@@ -83,6 +141,24 @@ def process_tracks_for_playlist(
             prefer_flac=lib_cfg.get("prefer_flac", True),
             album_hint=track.album,
         )
+
+        if not candidates:
+            fallback_min_bitrate = lib_cfg.get("fallback_min_mp3_bitrate", 192)
+            strict_min_bitrate = lib_cfg.get("min_mp3_bitrate", 320)
+            if fallback_min_bitrate < strict_min_bitrate:
+                logger.info(
+                    "[FALLBACK  ] %s - relaxing MP3 bitrate floor from %s to %s",
+                    label,
+                    strict_min_bitrate,
+                    fallback_min_bitrate,
+                )
+                candidates = slskd.filter_candidates(
+                    raw_results,
+                    accepted_formats=lib_cfg.get("accepted_formats", ["flac", "mp3"]),
+                    min_mp3_bitrate=fallback_min_bitrate,
+                    prefer_flac=lib_cfg.get("prefer_flac", True),
+                    album_hint=track.album,
+                )
 
         if not candidates:
             logger.warning("[MISSING   ] %s - no suitable results on Soulseek", label)
@@ -162,7 +238,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
     )
     slskd = SlskdClient(
         url=cfg["slskd"]["url"],
-        api_key=cfg["slskd"]["api_key"],
+        api_key=resolve_slskd_api_key(cfg),
         download_dir=cfg["slskd"]["download_dir"],
         search_timeout=cfg["slskd"].get("search_timeout", 30),
         result_limit=cfg["slskd"].get("result_limit", 100),
@@ -343,6 +419,7 @@ def main() -> None:
     )
 
     cfg = load_config(args.config)
+    validate_config(cfg)
 
     try:
         run(args, cfg)

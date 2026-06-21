@@ -20,7 +20,6 @@ def _norm(text: str) -> str:
 class JellyfinClient:
     def __init__(self, url: str, api_key: str, user_id: str) -> None:
         self.url = url.rstrip("/")
-        self.user_id = user_id
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -29,6 +28,29 @@ class JellyfinClient:
                 "Accept": "application/json",
             }
         )
+        self.user_id = self._resolve_user_id(user_id)
+
+    def _resolve_user_id(self, user_id_or_name: str) -> str:
+        """Accept either a Jellyfin user ID or a username and return the canonical ID."""
+        try:
+            resp = self._session.get(f"{self.url}/Users")
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Failed to resolve Jellyfin user '%s': %s", user_id_or_name, exc)
+            return user_id_or_name
+
+        wanted = user_id_or_name.strip().lower()
+        for user in resp.json():
+            user_name = str(user.get("Name", "")).strip().lower()
+            user_id = str(user.get("Id", "")).strip().lower()
+            if wanted == user_name or wanted == user_id:
+                resolved = str(user.get("Id", user_id_or_name))
+                if resolved.lower() != wanted:
+                    logger.info("Resolved Jellyfin user '%s' to id '%s'", user_id_or_name, resolved)
+                return resolved
+
+        logger.warning("Jellyfin user '%s' was not found; using it as-is", user_id_or_name)
+        return user_id_or_name
 
     # ------------------------------------------------------------------
     # Library search
