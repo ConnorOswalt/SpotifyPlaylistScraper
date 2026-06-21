@@ -10,6 +10,7 @@ import re
 import sys
 import time
 
+import requests
 import yaml
 
 from src.jellyfin import JellyfinClient
@@ -105,17 +106,64 @@ def process_tracks_for_playlist(
     lib_cfg: dict,
     tracks: list[SpotifyTrack],
     jellyfin_playlist_id: str,
+    jellyfin_playlist_name: str | None,
     no_download: bool,
 ) -> tuple[int, int, int, int]:
     matched = downloaded = failed = skipped = 0
+    playlist_items = jellyfin.get_playlist_items(jellyfin_playlist_id)
+    playlist_item_ids = {
+        str(item.get("Id"))
+        for item in playlist_items
+        if item.get("Id")
+    }
+
+    def track_already_in_playlist(candidate: SpotifyTrack) -> bool:
+        wanted_title = re.sub(r"[^a-z0-9]+", " ", candidate.title.lower()).strip()
+        wanted_artists = {a.strip().lower() for a in candidate.artist.split(",")}
+        for item in playlist_items:
+            item_title = re.sub(r"[^a-z0-9]+", " ", str(item.get("Name", "")).lower()).strip()
+            item_artists = {str(a).strip().lower() for a in item.get("Artists", [])}
+            same_title = (
+                item_title == wanted_title
+                or wanted_title in item_title
+                or item_title in wanted_title
+            )
+            if same_title and wanted_artists & item_artists:
+                return True
+        return False
 
     for track in tracks:
         label = f"{track.artist} - {track.title}"
 
+        if track_already_in_playlist(track):
+            logger.info("[PLAYLIST  ] %s", label)
+            matched += 1
+            continue
+
         jf_id = jellyfin.search_track(track)
         if jf_id:
             logger.info("[LIBRARY   ] %s", label)
-            jellyfin.add_to_playlist(jellyfin_playlist_id, [jf_id])
+            try:
+                previous_playlist_id = jellyfin_playlist_id
+                jellyfin_playlist_id = jellyfin.add_to_playlist(
+                    jellyfin_playlist_id,
+                    [jf_id],
+                    playlist_name=jellyfin_playlist_name,
+                )
+                if jellyfin_playlist_id != previous_playlist_id:
+                    playlist_items = jellyfin.get_playlist_items(jellyfin_playlist_id)
+                    playlist_item_ids = {
+                        str(item.get("Id"))
+                        for item in playlist_items
+                        if item.get("Id")
+                    }
+                else:
+                    playlist_item_ids.add(jf_id)
+                    playlist_items.append({"Id": jf_id, "Name": track.title, "Artists": track.artist.split(",")})
+            except requests.RequestException as exc:
+                logger.error("[ADD FAIL  ] %s - %s", label, exc)
+                failed += 1
+                continue
             matched += 1
             continue
 
@@ -210,7 +258,27 @@ def process_tracks_for_playlist(
 
         jf_id = jellyfin.find_track_by_name_artist(track.title, track.artist)
         if jf_id:
-            jellyfin.add_to_playlist(jellyfin_playlist_id, [jf_id])
+            try:
+                previous_playlist_id = jellyfin_playlist_id
+                jellyfin_playlist_id = jellyfin.add_to_playlist(
+                    jellyfin_playlist_id,
+                    [jf_id],
+                    playlist_name=jellyfin_playlist_name,
+                )
+                if jellyfin_playlist_id != previous_playlist_id:
+                    playlist_items = jellyfin.get_playlist_items(jellyfin_playlist_id)
+                    playlist_item_ids = {
+                        str(item.get("Id"))
+                        for item in playlist_items
+                        if item.get("Id")
+                    }
+                else:
+                    playlist_item_ids.add(jf_id)
+                    playlist_items.append({"Id": jf_id, "Name": track.title, "Artists": track.artist.split(",")})
+            except requests.RequestException as exc:
+                logger.error("[ADD FAIL  ] %s - %s", label, exc)
+                failed += 1
+                continue
             logger.info("[ADDED     ] %s", label)
             downloaded += 1
         else:
@@ -285,6 +353,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
                 lib_cfg=lib_cfg,
                 tracks=tracks,
                 jellyfin_playlist_id=playlist_id,
+                jellyfin_playlist_name=source.name,
                 no_download=args.no_download,
             )
             grand_matched += matched
@@ -319,6 +388,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
 
     playlist_id = resolve_playlist_id(jellyfin, args.jellyfin_playlist)
     logger.info("Target Jellyfin playlist: %s", playlist_id)
+    single_playlist_name = None if _UUID_RE.match(args.jellyfin_playlist) else args.jellyfin_playlist
 
     matched, downloaded, failed, skipped = process_tracks_for_playlist(
         jellyfin=jellyfin,
@@ -328,6 +398,7 @@ def run(args: argparse.Namespace, cfg: dict) -> None:
         lib_cfg=lib_cfg,
         tracks=tracks,
         jellyfin_playlist_id=playlist_id,
+        jellyfin_playlist_name=single_playlist_name,
         no_download=args.no_download,
     )
 

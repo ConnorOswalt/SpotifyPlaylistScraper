@@ -160,14 +160,60 @@ class JellyfinClient:
         logger.info("Created new playlist: %s (%s)", name, playlist_id)
         return playlist_id
 
-    def add_to_playlist(self, playlist_id: str, item_ids: list[str]) -> None:
+    def get_playlist_item_ids(self, playlist_id: str) -> set[str]:
+        """Return the Jellyfin item IDs currently present in a playlist."""
+        return {
+            str(item.get("Id"))
+            for item in self.get_playlist_items(playlist_id)
+            if item.get("Id")
+        }
+
+    def get_playlist_items(self, playlist_id: str) -> list[dict]:
+        """Return the current items in a Jellyfin playlist."""
+        try:
+            resp = self._session.get(
+                f"{self.url}/Playlists/{playlist_id}/Items",
+                params={"UserId": self.user_id},
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Failed to read Jellyfin playlist '%s': %s", playlist_id, exc)
+            return []
+
+        return resp.json().get("Items", [])
+
+    def add_to_playlist(
+        self,
+        playlist_id: str,
+        item_ids: list[str],
+        playlist_name: Optional[str] = None,
+    ) -> str:
         if not item_ids:
-            return
-        resp = self._session.post(
-            f"{self.url}/Playlists/{playlist_id}/Items",
-            params={"Ids": ",".join(item_ids), "UserId": self.user_id},
+            return playlist_id
+
+        def _post_add(target_playlist_id: str) -> requests.Response:
+            return self._session.post(
+                f"{self.url}/Playlists/{target_playlist_id}/Items",
+                params={"Ids": ",".join(item_ids), "UserId": self.user_id},
+            )
+
+        resp = _post_add(playlist_id)
+        if resp.status_code != 404:
+            resp.raise_for_status()
+            return playlist_id
+
+        if not playlist_name:
+            resp.raise_for_status()
+
+        logger.warning(
+            "Playlist id '%s' was not found while adding items; recreating '%s' and retrying once",
+            playlist_id,
+            playlist_name,
         )
-        resp.raise_for_status()
+        recovered_id = self.get_or_create_playlist(playlist_name)
+        retry = _post_add(recovered_id)
+        retry.raise_for_status()
+        return recovered_id
 
     # ------------------------------------------------------------------
     # Library refresh
